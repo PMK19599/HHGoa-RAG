@@ -1,0 +1,18 @@
+.venv/
+.env
+__pycache__/
+*.pyc
+
+# Local/generated data
+results/
+
+# Large/local ML artifacts
+*.faiss
+*.bin
+*.pt
+*.pth
+*.safetensors
+
+# IDE/editor
+.vscode/
+.idea/
