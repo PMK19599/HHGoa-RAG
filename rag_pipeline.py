@@ -5,9 +5,9 @@ from pathlib import Path
 
 import faiss
 import numpy as np
-import requests
 from dotenv import load_dotenv
 from sentence_transformers import SentenceTransformer, CrossEncoder
+from groq import Groq
 
 
 # ============================================================
@@ -22,45 +22,48 @@ META_PATH = Path("data/bge_native_metadata.json")
 EMBED_MODEL = "BAAI/bge-small-en-v1.5"
 CROSS_MODEL = "cross-encoder/ms-marco-MiniLM-L6-v2"
 
-# ------------------------------------------------------------
-# Retrieval configuration
-# ------------------------------------------------------------
-
-# Retrieve a larger dense candidate pool first.
-CANDIDATE_K = 20
-
-# Keep only the strongest reranked passages.
-TOP_K = 5
-
-
-# ------------------------------------------------------------
-# Guardrail configuration
-# ------------------------------------------------------------
-
-# Validated using benchmark_combined_guardrail.py:
-#
-# Cross >= 7.0 + Dense >= 0.70
-#
-# Result:
-# Accuracy       : 0.790
-# False answers  : 11
-# False refusals : 10
-#
-# Gap signal was tested but intentionally NOT included because
-# it increased false refusals substantially.
+DENSE_CANDIDATE_K = 20
+FINAL_TOP_K = 5
+EVIDENCE_TOP_K = 3
 
 DENSE_THRESHOLD = 0.70
 CROSS_THRESHOLD = 7.0
 
-
-# ------------------------------------------------------------
-# Groq configuration
-# ------------------------------------------------------------
-
-GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-
-# This is the model verified successfully with test_groq.py.
 GROQ_MODEL = "openai/gpt-oss-20b"
+
+MAX_COMPLETION_TOKENS = 150
+
+
+# ============================================================
+# CONSTANTS
+# ============================================================
+
+REFUSAL_MESSAGE = (
+    "I don't have enough reliable evidence in the retrieved "
+    "passages to answer this question."
+)
+
+
+SYSTEM_PROMPT = """
+You are the answer-generation component of a retrieval-augmented
+question answering system.
+
+You MUST answer using only the supplied evidence.
+
+Rules:
+1. Use only the supplied evidence.
+2. Do not use outside knowledge.
+3. Do not invent or assume facts that are not supported by the evidence.
+4. If the evidence does not contain enough information to answer,
+   respond exactly with:
+
+"I don't have enough reliable evidence in the retrieved passages
+to answer this question."
+
+5. Keep the answer concise and direct.
+6. Do not mention the retrieval system, models, scores, or guardrails.
+7. Do not add information merely because it is generally known.
+""".strip()
 
 
 # ============================================================
@@ -72,12 +75,14 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not GROQ_API_KEY:
     raise RuntimeError(
         "GROQ_API_KEY is not set. "
-        "Add it to your .env file before running the pipeline."
+        "Add it to the .env file before running the pipeline."
     )
+
+groq_client = Groq(api_key=GROQ_API_KEY)
 
 
 # ============================================================
-# LOAD MODELS
+# MODEL LOADING
 # ============================================================
 
 print("Loading models...")
@@ -99,14 +104,30 @@ print(f"Index ready: {index.ntotal} passages")
 
 
 # ============================================================
+# WARMUP
+# ============================================================
+
+print("Warming up models...")
+
+embed_model.encode(
+    ["warmup"],
+    normalize_embeddings=True
+)
+
+cross_model.predict(
+    [["warmup query", "warmup passage"]]
+)
+
+
+# ============================================================
 # RETRIEVAL
 # ============================================================
 
 def retrieve(query):
-
-    # --------------------------------------------------------
-    # 1. Dense retrieval
-    # --------------------------------------------------------
+    """
+    Retrieve dense Top-20 candidates and rerank them with
+    the cross-encoder. Return the final Top-5.
+    """
 
     query_embedding = embed_model.encode(
         [query],
@@ -120,7 +141,7 @@ def retrieve(query):
 
     dense_scores, indices = index.search(
         query_embedding,
-        CANDIDATE_K
+        DENSE_CANDIDATE_K
     )
 
     candidates = []
@@ -135,21 +156,18 @@ def retrieve(query):
         if idx < 0 or idx >= len(metadata):
             continue
 
-        passage = metadata[idx]["text"]
-
         candidates.append({
+            "metadata_index": idx,
             "dense_score": float(dense_score),
             "cross_score": None,
-            "text": passage,
-            "metadata_index": idx
+            "text": metadata[idx]["text"]
         })
 
     if not candidates:
         return []
 
-
     # --------------------------------------------------------
-    # 2. Cross-encoder reranking
+    # Cross-encoder reranking
     # --------------------------------------------------------
 
     pairs = [
@@ -163,46 +181,29 @@ def retrieve(query):
         candidates,
         cross_scores
     ):
-
         candidate["cross_score"] = float(cross_score)
 
-
-    # Highest cross-encoder score first
     candidates.sort(
         key=lambda x: x["cross_score"],
         reverse=True
     )
 
-
-    # --------------------------------------------------------
-    # 3. Final Top-K
-    # --------------------------------------------------------
-
-    return candidates[:TOP_K]
+    return candidates[:FINAL_TOP_K]
 
 
 # ============================================================
-# GROQ GENERATION
+# GENERATION
 # ============================================================
 
 def generate_answer(query, evidence):
+    """
+    Generate an answer using only the selected evidence.
 
-    system_prompt = """
-You are the answer-generation component of a retrieval-augmented
-question answering system.
-
-You MUST answer using only the supplied evidence.
-
-Rules:
-1. Do not use outside knowledge.
-2. Do not invent facts.
-3. If the evidence does not contain enough information to answer,
-   say exactly:
-   "I don't have enough reliable evidence in the retrieved passages
-   to answer this question."
-4. Keep answers concise and direct.
-5. Do not mention the retrieval system unless necessary.
-"""
+    Returns:
+        answer
+        TTFT in milliseconds
+        total generation latency in milliseconds
+    """
 
     user_prompt = f"""
 Question:
@@ -212,56 +213,67 @@ Retrieved evidence:
 
 {evidence}
 
-Answer the question using only the evidence above.
-"""
-
-    headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
-        "Content-Type": "application/json"
-    }
-
-    payload = {
-        "model": GROQ_MODEL,
-        "messages": [
-            {
-                "role": "system",
-                "content": system_prompt.strip()
-            },
-            {
-                "role": "user",
-                "content": user_prompt.strip()
-            }
-        ],
-        "temperature": 0,
-        "max_completion_tokens": 150,
-        "stream": False
-    }
+Answer the question using only the retrieved evidence.
+""".strip()
 
     start = time.perf_counter()
 
-    response = requests.post(
-        GROQ_API_URL,
-        headers=headers,
-        json=payload,
-        timeout=60
+    stream = groq_client.chat.completions.create(
+        model=GROQ_MODEL,
+        messages=[
+            {
+                "role": "system",
+                "content": SYSTEM_PROMPT
+            },
+            {
+                "role": "user",
+                "content": user_prompt
+            }
+        ],
+        reasoning_effort="low",
+        include_reasoning=False,
+        temperature=0,
+        max_completion_tokens=MAX_COMPLETION_TOKENS,
+        stream=True
     )
 
-    elapsed = (
-        time.perf_counter() - start
+    first_content_time = None
+    answer_parts = []
+
+    for chunk in stream:
+
+        if not chunk.choices:
+            continue
+
+        content = chunk.choices[0].delta.content
+
+        if not content:
+            continue
+
+        if first_content_time is None:
+            first_content_time = time.perf_counter()
+
+        answer_parts.append(content)
+
+    end = time.perf_counter()
+
+    answer = "".join(answer_parts).strip()
+
+    if first_content_time is None:
+        ttft_ms = None
+    else:
+        ttft_ms = (
+            first_content_time - start
+        ) * 1000
+
+    total_ms = (
+        end - start
     ) * 1000
 
-    if response.status_code != 200:
+    if not answer:
+        answer = REFUSAL_MESSAGE
 
-        raise RuntimeError(
-            f"Groq API error {response.status_code}: "
-            f"{response.text}"
-        )
-
-    data = response.json()
-
-    answer = data["choices"][0]["message"]["content"].strip()
-
-    return answer, elapsed
+    return answer, ttft_ms, total_ms
 
 
 # ============================================================
@@ -272,9 +284,8 @@ def answer_query(query):
 
     total_start = time.perf_counter()
 
-
     # --------------------------------------------------------
-    # Retrieval + reranking
+    # Retrieval
     # --------------------------------------------------------
 
     retrieval_start = time.perf_counter()
@@ -285,28 +296,42 @@ def answer_query(query):
         time.perf_counter() - retrieval_start
     ) * 1000
 
+    # --------------------------------------------------------
+    # Empty retrieval
+    # --------------------------------------------------------
 
     if not results:
 
-        print("\nDecision: REFUSE")
+        total_elapsed = (
+            time.perf_counter() - total_start
+        ) * 1000
 
+        print("\n=== GUARDRAIL ===")
+        print("Decision: REFUSE")
+
+        print(f"\n{REFUSAL_MESSAGE}")
+
+        print("\n=== LATENCY ===")
         print(
-            "\nI don't have enough reliable evidence "
-            "in the retrieved passages to answer this question."
+            f"Retrieval + reranking: "
+            f"{retrieval_elapsed:.2f} ms"
+        )
+        print(
+            f"Total pipeline: "
+            f"{total_elapsed:.2f} ms"
         )
 
         return
 
-
     # --------------------------------------------------------
-    # Show reranked Top-5
+    # Display results
     # --------------------------------------------------------
 
     print("\n=== RERANKED TOP-5 ===")
 
-    for i, result in enumerate(results, 1):
+    for rank, result in enumerate(results, 1):
 
-        print(f"\n#{i}")
+        print(f"\n#{rank}")
 
         print(
             f"Dense: "
@@ -322,7 +347,6 @@ def answer_query(query):
             result["text"][:500]
         )
 
-
     # --------------------------------------------------------
     # Guardrail
     # --------------------------------------------------------
@@ -336,7 +360,6 @@ def answer_query(query):
         best_dense >= DENSE_THRESHOLD
         and best_cross >= CROSS_THRESHOLD
     )
-
 
     print("\n=== GUARDRAIL ===")
 
@@ -352,27 +375,23 @@ def answer_query(query):
 
     print(
         f"Dense threshold: "
-        f"{DENSE_THRESHOLD}"
+        f"{DENSE_THRESHOLD:.2f}"
     )
 
     print(
         f"Cross threshold: "
-        f"{CROSS_THRESHOLD}"
+        f"{CROSS_THRESHOLD:.2f}"
     )
 
-
     # --------------------------------------------------------
-    # REFUSE
+    # REFUSAL
     # --------------------------------------------------------
 
     if not answerable:
 
         print("\nDecision: REFUSE")
 
-        print(
-            "\nI don't have enough reliable evidence "
-            "in the retrieved passages to answer this question."
-        )
+        print(f"\n{REFUSAL_MESSAGE}")
 
         total_elapsed = (
             time.perf_counter() - total_start
@@ -381,7 +400,7 @@ def answer_query(query):
         print("\n=== LATENCY ===")
 
         print(
-            f"Dense + reranking: "
+            f"Retrieval + reranking: "
             f"{retrieval_elapsed:.2f} ms"
         )
 
@@ -392,60 +411,67 @@ def answer_query(query):
 
         return
 
-
     # --------------------------------------------------------
     # ANSWER
     # --------------------------------------------------------
 
     print("\nDecision: ANSWER")
 
+    print("\n=== SELECTED EVIDENCE ===")
+
+    print(best["text"])
 
     # --------------------------------------------------------
-    # Evidence selection
-    #
-    # Use the strongest 3 reranked passages for generation.
+    # Top-3 evidence
     # --------------------------------------------------------
 
     evidence_parts = []
 
-    for i, result in enumerate(
-        results[:3],
+    for rank, result in enumerate(
+        results[:EVIDENCE_TOP_K],
         1
     ):
 
         evidence_parts.append(
-            f"[Evidence {i}]\n"
+            f"[Evidence {rank}]\n"
             f"{result['text']}"
         )
 
     evidence = "\n\n".join(evidence_parts)
 
-
-    print("\n=== SELECTED EVIDENCE ===")
-
-    print(
-        best["text"]
-    )
-
-
     # --------------------------------------------------------
-    # Groq generation
+    # Generation
     # --------------------------------------------------------
 
     try:
 
-        answer, generation_latency = generate_answer(
+        answer, ttft_ms, generation_ms = generate_answer(
             query,
             evidence
         )
 
     except Exception as e:
 
+        total_elapsed = (
+            time.perf_counter() - total_start
+        ) * 1000
+
         print("\n=== GENERATION ERROR ===")
         print(str(e))
 
-        return
+        print("\n=== LATENCY ===")
 
+        print(
+            f"Retrieval + reranking: "
+            f"{retrieval_elapsed:.2f} ms"
+        )
+
+        print(
+            f"Total pipeline: "
+            f"{total_elapsed:.2f} ms"
+        )
+
+        return
 
     # --------------------------------------------------------
     # Final answer
@@ -454,7 +480,6 @@ def answer_query(query):
     print("\n=== FINAL ANSWER ===")
 
     print(answer)
-
 
     # --------------------------------------------------------
     # Latency
@@ -467,13 +492,23 @@ def answer_query(query):
     print("\n=== LATENCY ===")
 
     print(
-        f"Dense + reranking: "
+        f"Retrieval + reranking: "
         f"{retrieval_elapsed:.2f} ms"
     )
 
+    if ttft_ms is not None:
+        print(
+            f"Generation TTFT: "
+            f"{ttft_ms:.2f} ms"
+        )
+    else:
+        print(
+            "Generation TTFT: N/A"
+        )
+
     print(
-        f"Generation: "
-        f"{generation_latency:.2f} ms"
+        f"Generation total: "
+        f"{generation_ms:.2f} ms"
     )
 
     print(
@@ -491,7 +526,13 @@ print("\nHH Goa RAG")
 print(
     "Architecture: "
     "BGE Top-20 -> Cross-Encoder -> Top-5 "
-    "-> Guardrail -> Groq"
+    "-> Guardrail -> Top-3 Evidence -> GPT-OSS-20B"
+)
+
+print(
+    f"Guardrail: "
+    f"Dense >= {DENSE_THRESHOLD:.2f} "
+    f"AND Cross >= {CROSS_THRESHOLD:.2f}"
 )
 
 print("Type 'exit' to quit.")
@@ -499,7 +540,14 @@ print("Type 'exit' to quit.")
 
 while True:
 
-    query = input("\nEnter query: ").strip()
+    try:
+        query = input("\nEnter query: ").strip()
+
+    except (KeyboardInterrupt, EOFError):
+
+        print("\nExiting.")
+
+        break
 
     if query.lower() == "exit":
         break
