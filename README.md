@@ -1,4 +1,4 @@
-\# HHGoa-RAG
+## HHGoa-RAG
 
 
 
@@ -10,7 +10,7 @@ HHGoa-RAG combines dense retrieval, cross-encoder reranking, evidence filtering,
 
 
 
-\## The Core Idea
+## The Core Idea
 
 
 
@@ -30,11 +30,11 @@ The system can either answer from retrieved evidence or refuse when the evidence
 
 
 
-\---
+---
 
 
 
-\## Architecture
+## Architecture
 
 
 
