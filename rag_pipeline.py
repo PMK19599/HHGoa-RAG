@@ -280,7 +280,12 @@ Answer the question using only the retrieved evidence.
 # QUERY PIPELINE
 # ============================================================
 
-def answer_query(query):
+def run_query(query, verbose=True):
+    """
+    Run the complete RAG pipeline and return a structured result.
+
+    This is the reusable API used by both the CLI and voice harness.
+    """
 
     total_start = time.perf_counter()
 
@@ -306,46 +311,31 @@ def answer_query(query):
             time.perf_counter() - total_start
         ) * 1000
 
-        print("\n=== GUARDRAIL ===")
-        print("Decision: REFUSE")
+        if verbose:
+            print("\n=== GUARDRAIL ===")
+            print("Decision: REFUSE")
+            print(f"\n{REFUSAL_MESSAGE}")
 
-        print(f"\n{REFUSAL_MESSAGE}")
+            print("\n=== LATENCY ===")
+            print(
+                f"Retrieval + reranking: "
+                f"{retrieval_elapsed:.2f} ms"
+            )
+            print(
+                f"Total pipeline: "
+                f"{total_elapsed:.2f} ms"
+            )
 
-        print("\n=== LATENCY ===")
-        print(
-            f"Retrieval + reranking: "
-            f"{retrieval_elapsed:.2f} ms"
-        )
-        print(
-            f"Total pipeline: "
-            f"{total_elapsed:.2f} ms"
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # Display results
-    # --------------------------------------------------------
-
-    print("\n=== RERANKED TOP-5 ===")
-
-    for rank, result in enumerate(results, 1):
-
-        print(f"\n#{rank}")
-
-        print(
-            f"Dense: "
-            f"{result['dense_score']:.4f}"
-        )
-
-        print(
-            f"Cross: "
-            f"{result['cross_score']:.4f}"
-        )
-
-        print(
-            result["text"][:500]
-        )
+        return {
+            "query": query,
+            "decision": "REFUSE",
+            "answer": REFUSAL_MESSAGE,
+            "evidence": [],
+            "retrieval_ms": retrieval_elapsed,
+            "ttft_ms": None,
+            "generation_ms": 0.0,
+            "total_ms": total_elapsed,
+        }
 
     # --------------------------------------------------------
     # Guardrail
@@ -361,27 +351,48 @@ def answer_query(query):
         and best_cross >= CROSS_THRESHOLD
     )
 
-    print("\n=== GUARDRAIL ===")
+    if verbose:
+        print("\n=== RERANKED TOP-5 ===")
 
-    print(
-        f"Selected dense score: "
-        f"{best_dense:.4f}"
-    )
+        for rank, result in enumerate(results, 1):
 
-    print(
-        f"Selected cross score: "
-        f"{best_cross:.4f}"
-    )
+            print(f"\n#{rank}")
 
-    print(
-        f"Dense threshold: "
-        f"{DENSE_THRESHOLD:.2f}"
-    )
+            print(
+                f"Dense: "
+                f"{result['dense_score']:.4f}"
+            )
 
-    print(
-        f"Cross threshold: "
-        f"{CROSS_THRESHOLD:.2f}"
-    )
+            print(
+                f"Cross: "
+                f"{result['cross_score']:.4f}"
+            )
+
+            print(
+                result["text"][:500]
+            )
+
+        print("\n=== GUARDRAIL ===")
+
+        print(
+            f"Selected dense score: "
+            f"{best_dense:.4f}"
+        )
+
+        print(
+            f"Selected cross score: "
+            f"{best_cross:.4f}"
+        )
+
+        print(
+            f"Dense threshold: "
+            f"{DENSE_THRESHOLD:.2f}"
+        )
+
+        print(
+            f"Cross threshold: "
+            f"{CROSS_THRESHOLD:.2f}"
+        )
 
     # --------------------------------------------------------
     # REFUSAL
@@ -389,37 +400,36 @@ def answer_query(query):
 
     if not answerable:
 
-        print("\nDecision: REFUSE")
-
-        print(f"\n{REFUSAL_MESSAGE}")
-
         total_elapsed = (
             time.perf_counter() - total_start
         ) * 1000
 
-        print("\n=== LATENCY ===")
+        if verbose:
+            print("\nDecision: REFUSE")
+            print(f"\n{REFUSAL_MESSAGE}")
 
-        print(
-            f"Retrieval + reranking: "
-            f"{retrieval_elapsed:.2f} ms"
-        )
+            print("\n=== LATENCY ===")
 
-        print(
-            f"Total pipeline: "
-            f"{total_elapsed:.2f} ms"
-        )
+            print(
+                f"Retrieval + reranking: "
+                f"{retrieval_elapsed:.2f} ms"
+            )
 
-        return
+            print(
+                f"Total pipeline: "
+                f"{total_elapsed:.2f} ms"
+            )
 
-    # --------------------------------------------------------
-    # ANSWER
-    # --------------------------------------------------------
-
-    print("\nDecision: ANSWER")
-
-    print("\n=== SELECTED EVIDENCE ===")
-
-    print(best["text"])
+        return {
+            "query": query,
+            "decision": "REFUSE",
+            "answer": REFUSAL_MESSAGE,
+            "evidence": [],
+            "retrieval_ms": retrieval_elapsed,
+            "ttft_ms": None,
+            "generation_ms": 0.0,
+            "total_ms": total_elapsed,
+        }
 
     # --------------------------------------------------------
     # Top-3 evidence
@@ -439,6 +449,11 @@ def answer_query(query):
 
     evidence = "\n\n".join(evidence_parts)
 
+    if verbose:
+        print("\nDecision: ANSWER")
+        print("\n=== SELECTED EVIDENCE ===")
+        print(best["text"])
+
     # --------------------------------------------------------
     # Generation
     # --------------------------------------------------------
@@ -456,8 +471,45 @@ def answer_query(query):
             time.perf_counter() - total_start
         ) * 1000
 
-        print("\n=== GENERATION ERROR ===")
-        print(str(e))
+        if verbose:
+            print("\n=== GENERATION ERROR ===")
+            print(str(e))
+
+            print("\n=== LATENCY ===")
+
+            print(
+                f"Retrieval + reranking: "
+                f"{retrieval_elapsed:.2f} ms"
+            )
+
+            print(
+                f"Total pipeline: "
+                f"{total_elapsed:.2f} ms"
+            )
+
+        return {
+            "query": query,
+            "decision": "ERROR",
+            "answer": REFUSAL_MESSAGE,
+            "evidence": results[:EVIDENCE_TOP_K],
+            "retrieval_ms": retrieval_elapsed,
+            "ttft_ms": None,
+            "generation_ms": 0.0,
+            "total_ms": total_elapsed,
+            "error": str(e),
+        }
+
+    # --------------------------------------------------------
+    # Final result
+    # --------------------------------------------------------
+
+    total_elapsed = (
+        time.perf_counter() - total_start
+    ) * 1000
+
+    if verbose:
+        print("\n=== FINAL ANSWER ===")
+        print(answer)
 
         print("\n=== LATENCY ===")
 
@@ -466,93 +518,84 @@ def answer_query(query):
             f"{retrieval_elapsed:.2f} ms"
         )
 
+        if ttft_ms is not None:
+            print(
+                f"Generation TTFT: "
+                f"{ttft_ms:.2f} ms"
+            )
+        else:
+            print(
+                "Generation TTFT: N/A"
+            )
+
+        print(
+            f"Generation total: "
+            f"{generation_ms:.2f} ms"
+        )
+
         print(
             f"Total pipeline: "
             f"{total_elapsed:.2f} ms"
         )
 
-        return
+    return {
+        "query": query,
+        "decision": "ANSWER",
+        "answer": answer,
+        "evidence": results[:EVIDENCE_TOP_K],
+        "retrieval_ms": retrieval_elapsed,
+        "ttft_ms": ttft_ms,
+        "generation_ms": generation_ms,
+        "total_ms": total_elapsed,
+    }
 
-    # --------------------------------------------------------
-    # Final answer
-    # --------------------------------------------------------
 
-    print("\n=== FINAL ANSWER ===")
+def answer_query(query):
+    """
+    Backward-compatible CLI wrapper.
+    """
 
-    print(answer)
-
-    # --------------------------------------------------------
-    # Latency
-    # --------------------------------------------------------
-
-    total_elapsed = (
-        time.perf_counter() - total_start
-    ) * 1000
-
-    print("\n=== LATENCY ===")
-
-    print(
-        f"Retrieval + reranking: "
-        f"{retrieval_elapsed:.2f} ms"
-    )
-
-    if ttft_ms is not None:
-        print(
-            f"Generation TTFT: "
-            f"{ttft_ms:.2f} ms"
-        )
-    else:
-        print(
-            "Generation TTFT: N/A"
-        )
-
-    print(
-        f"Generation total: "
-        f"{generation_ms:.2f} ms"
-    )
-
-    print(
-        f"Total pipeline: "
-        f"{total_elapsed:.2f} ms"
-    )
+    return run_query(query, verbose=True)
 
 
 # ============================================================
 # MAIN LOOP
 # ============================================================
 
-print("\nHH Goa RAG")
+if __name__ == "__main__":
 
-print(
-    "Architecture: "
-    "BGE Top-20 -> Cross-Encoder -> Top-5 "
-    "-> Guardrail -> Top-3 Evidence -> GPT-OSS-20B"
-)
+    print("\nHH Goa RAG")
 
-print(
-    f"Guardrail: "
-    f"Dense >= {DENSE_THRESHOLD:.2f} "
-    f"AND Cross >= {CROSS_THRESHOLD:.2f}"
-)
+    print(
+        "Architecture: "
+        "BGE Top-20 -> Cross-Encoder -> Top-5 "
+        "-> Guardrail -> Top-3 Evidence -> GPT-OSS-20B"
+    )
 
-print("Type 'exit' to quit.")
+    print(
+        f"Guardrail: "
+        f"Dense >= {DENSE_THRESHOLD:.2f} "
+        f"AND Cross >= {CROSS_THRESHOLD:.2f}"
+    )
 
+    print("Type 'exit' to quit.")
 
-while True:
+    while True:
 
-    try:
-        query = input("\nEnter query: ").strip()
+        try:
+            query = input("\nEnter query: ").strip()
 
-    except (KeyboardInterrupt, EOFError):
+        except (KeyboardInterrupt, EOFError):
 
-        print("\nExiting.")
+            print("\nExiting.")
 
-        break
+            break
 
-    if query.lower() == "exit":
-        break
+        if query.lower() == "exit":
+            break
 
-    if not query:
-        continue
+        if not query:
+            continue
 
-    answer_query(query)
+        answer_query(query)
+
