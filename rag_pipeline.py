@@ -22,16 +22,16 @@ META_PATH = Path("data/bge_native_metadata.json")
 EMBED_MODEL = "BAAI/bge-small-en-v1.5"
 CROSS_MODEL = "cross-encoder/ms-marco-MiniLM-L6-v2"
 
-DENSE_CANDIDATE_K = 20
+DENSE_CANDIDATE_K = 5
 FINAL_TOP_K = 5
 EVIDENCE_TOP_K = 3
 
 DENSE_THRESHOLD = 0.70
 CROSS_THRESHOLD = 7.0
 
-GROQ_MODEL = "openai/gpt-oss-20b"
+GROQ_MODEL = "qwen/qwen3.6-27b"
 
-MAX_COMPLETION_TOKENS = 150
+MAX_COMPLETION_TOKENS = 48
 
 
 # ============================================================
@@ -230,8 +230,7 @@ Answer the question using only the retrieved evidence.
                 "content": user_prompt
             }
         ],
-        reasoning_effort="low",
-        include_reasoning=False,
+        reasoning_effort="none",
         temperature=0,
         max_completion_tokens=MAX_COMPLETION_TOKENS,
         stream=True
@@ -568,8 +567,8 @@ if __name__ == "__main__":
 
     print(
         "Architecture: "
-        "BGE Top-20 -> Cross-Encoder -> Top-5 "
-        "-> Guardrail -> Top-3 Evidence -> GPT-OSS-20B"
+        "BGE Top-5 -> Cross-Encoder -> Top-5 "
+        "-> Guardrail -> Top-3 Evidence -> Qwen 3.6 27B"
     )
 
     print(
@@ -598,4 +597,6 @@ if __name__ == "__main__":
             continue
 
         answer_query(query)
+
+
 
