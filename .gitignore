@@ -16,3 +16,5 @@ results/
 # IDE/editor
 .vscode/
 .idea/
+
+*.backup.py

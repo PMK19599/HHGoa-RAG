@@ -26,7 +26,7 @@ CROSS_MODEL = "cross-encoder/ms-marco-MiniLM-L6-v2"
 
 NUM_QUERIES = 100
 
-DENSE_CANDIDATE_K = 20
+DENSE_CANDIDATE_K = 5
 FINAL_TOP_K = 5
 
 # FROZEN production guardrail
@@ -39,10 +39,10 @@ VERIFIER_TOP_K = 3
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 # Same model that already worked in test_groq.py
-GROQ_MODEL = "openai/gpt-oss-20b"
+GROQ_MODEL = "qwen/qwen3.6-27b"
 
 # Keep verifier output tiny and deterministic.
-MAX_COMPLETION_TOKENS = 20
+MAX_COMPLETION_TOKENS = 48
 
 
 # ============================================================
@@ -254,7 +254,7 @@ NOT_SUPPORTED
         ],
         "temperature": 0,
         "max_completion_tokens": MAX_COMPLETION_TOKENS,
-        "reasoning_effort": "low",
+        "reasoning_effort": "none",
         "include_reasoning": False
     }
 
